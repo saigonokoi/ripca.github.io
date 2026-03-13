@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>CCTV A→B Route (traffic on route only)</title>
+    <style>
+      html, body { height: 100%; margin: 0; }
+      #app { display: flex; height: 100%; }
+      #map { flex: 1; }
+      #panel{
+        width: 360px; padding: 12px; box-sizing: border-box;
+        border-left: 1px solid #ddd; font-family: system-ui, Arial, sans-serif;
+      }
+      .pill{
+        display:inline-block; padding:4px 10px; margin:4px 6px 0 0;
+        border:1px solid #ddd; border-radius:999px; font-size:13px;
+      }
+      button{ margin-top:10px; padding:8px 10px; cursor:pointer; }
+      .muted{ color:#666; font-size:12px; line-height:1.35; }
+      hr{ border:0; border-top:1px solid #eee; margin:12px 0; }
+    </style>
+
+    <script>
+      const cctvs = [
+        { cctv_name: "CCTV A", lat: 3.1390, lng: 101.6869 },
+        { cctv_name: "CCTV B", lat: 3.0738, lng: 101.5183 },
+        { cctv_name: "CCTV C", lat: 3.1579, lng: 101.7123 },
+        { cctv_name: "CCTV D", lat: 3.0600, lng: 101.7000 },
+      ];
+
+      let map;
+      let selected = [];
+      let routePolylines = [];
+
+      function setPanel(html) {
+        document.getElementById("routeInfo").innerHTML = html;
+      }
+
+      function renderSelected() {
+        const el = document.getElementById("selected");
+        el.innerHTML = "";
+        if (selected.length === 0) {
+          el.innerHTML = `<span class="muted">Click 2 CCTV markers to show route traffic (route only).</span>`;
+          return;
+        }
+        selected.forEach(s => {
+          const span = document.createElement("span");
+          span.className = "pill";
+          span.textContent = s.cctv_name;
+          el.appendChild(span);
+        });
+      }
+
+      function clearRoute() {
+        routePolylines.forEach(p => p.setMap(null));
+        routePolylines = [];
+        setPanel(`<span class="muted">No route yet. Click 2 CCTV markers.</span>`);
+      }
+
+      async function computeAndDrawRouteOnly() {
+        if (selected.length !== 2) return;
+
+        clearRoute();
+        setPanel(`<span class="muted">Calculating route with traffic...</span>`);
+
+        const {
+          Route,
+          TravelMode,
+          RoutingPreference,
+          ComputeRoutesExtraComputation,
+          Speed
+        } = await google.maps.importLibrary("routes");
+
+        const request = {
+          origin: { location: { lat: selected[0].lat, lng: selected[0].lng } },
+          destination: { location: { lat: selected[1].lat, lng: selected[1].lng } },
+          travelMode: TravelMode.DRIVE,
+          routingPreference: RoutingPreference.TRAFFIC_AWARE_OPTIMAL,
+          extraComputations: [ComputeRoutesExtraComputation.TRAFFIC_ON_POLYLINE],
+
+          // ✅ fields must be an array, and field names are JS Route fields (no "routes.")
+          fields: ["distanceMeters", "durationMillis", "viewport", "path", "speedPaths"]
+        };
+
+        try {
+          const { routes } = await Route.computeRoutes(request);
+          if (!routes?.length) {
+            setPanel(`<span class="muted">No routes returned.</span>`);
+            return;
+          }
+
+          const route = routes[0];
+          const km = (route.distanceMeters / 1000).toFixed(1);
+          const mins = Math.round(route.durationMillis / 60000);
+
+          const polylines = route.createPolylines({
+            polylineOptions: (defaultOpts, details) => {
+              let strokeColor = "#1a73e8";
+              if (details.speed === Speed.SLOW) strokeColor = "#fbbc04";
+              if (details.speed === Speed.TRAFFIC_JAM) strokeColor = "#ea4335";
+
+              return {
+                ...defaultOpts,
+                strokeColor,
+                strokeOpacity: 0.95,
+                strokeWeight: 7,
+              };
+            },
+          });
+
+          polylines.forEach(p => p.setMap(map));
+          routePolylines = polylines;
+
+          if (route.viewport) map.fitBounds(route.viewport);
+
+          setPanel(`
+            <div><b>From:</b> ${selected[0].cctv_name}</div>
+            <div><b>To:</b> ${selected[1].cctv_name}</div>
+            <div style="margin-top:8px"><b>Distance:</b> ${km} km</div>
+            <div><b>ETA:</b> ${mins} min (traffic-aware)</div>
+            <div class="muted" style="margin-top:10px">
+              Route traffic legend:
+              <span style="color:#1a73e8;font-weight:600">Normal</span> /
+              <span style="color:#fbbc04;font-weight:600">Slow</span> /
+              <span style="color:#ea4335;font-weight:600">Jam</span><br/>
+              (No full-map traffic overlay.)
+            </div>
+          `);
+        } catch (e) {
+          console.error(e);
+          setPanel(`<span class="muted">Route compute error. See console.</span>`);
+        }
+      }
+
+      async function initMap() {
+        const { Map } = await google.maps.importLibrary("maps");
+
+        map = new Map(document.getElementById("map"), {
+          center: { lat: 3.1390, lng: 101.6869 },
+          zoom: 11
+        });
+
+        cctvs.forEach(c => {
+          const marker = new google.maps.Marker({
+            map,
+            position: { lat: c.lat, lng: c.lng },
+            title: c.cctv_name,
+          });
+
+          marker.addListener("click", async () => {
+            if (selected.length === 2) {
+              selected = [];
+              clearRoute();
+            }
+
+            selected.push(c);
+            renderSelected();
+
+            if (selected.length === 2) await computeAndDrawRouteOnly();
+            else clearRoute();
+          });
+        });
+
+        document.getElementById("reset").addEventListener("click", () => {
+          selected = [];
+          renderSelected();
+          clearRoute();
+        });
+
+        renderSelected();
+        clearRoute();
+      }
+
+      window.initMap = initMap;
+    </script>
+  </head>
+
+  <body>
+    <div id="app">
+      <div id="map"></div>
+      <div id="panel">
+        <div><b>Selected CCTVs</b></div>
+        <div id="selected" style="margin:10px 0;"></div>
+        <button id="reset">Reset</button>
+
+        <hr />
+
+        <div><b>Route (traffic on route only)</b></div>
+        <div id="routeInfo" style="margin-top:10px;"></div>
+
+        <hr />
+        <div class="muted">
+          Default: no traffic shown.<br/>
+          After 2 clicks: only A→B route is drawn, colored by traffic.
+        </div>
+      </div>
+    </div>
+
+
+    <!-- Replace YOUR_API_KEY -->
+    <script
+      src="https://maps.googleapis.com/maps/api/js?key=AIzaSyBGZvxF6XHjO_zgPW6xBXhefPgBHN9MCL0&callback=initMap&v=weekly"
+      async
+      defer
+    ></script>
+  </body>
+</html>
+
